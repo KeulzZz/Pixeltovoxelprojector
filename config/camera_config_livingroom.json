@@ -1,0 +1,41 @@
+{
+  "grid": {
+    "size": [100, 100, 60],
+    "voxel_size": 0.05,
+    "center": [2.5, 2.5, 1.5],
+    "decay_rate": 0.85,
+    "motion_threshold": 8.0,
+    "distance_attenuation": 0.5,
+    "show_debug": true,
+    "save_interval_seconds": 60
+  },
+  "cameras": [
+    {
+      "camera_index": 0,
+      "rtsp_url": "rtsp://username:password@192.168.1.100:554/stream2",
+      "camera_position": [0.0, 0.0, 2.0],
+      "yaw": 0.0,
+      "pitch": -15.0,
+      "roll": 0.0,
+      "fov_degrees": 130.0
+    },
+    {
+      "camera_index": 1,
+      "rtsp_url": "rtsp://username:password@192.168.1.101:554/stream2",
+      "camera_position": [5.0, 0.0, 2.0],
+      "yaw": 135.0,
+      "pitch": -15.0,
+      "roll": 0.0,
+      "fov_degrees": 130.0
+    },
+    {
+      "camera_index": 2,
+      "rtsp_url": "rtsp://username:password@192.168.1.102:554/stream2",
+      "camera_position": [5.0, 5.0, 2.0],
+      "yaw": 225.0,
+      "pitch": -15.0,
+      "roll": 0.0,
+      "fov_degrees": 130.0
+    }
+  ]
+}
