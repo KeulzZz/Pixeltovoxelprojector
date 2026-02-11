@@ -39,10 +39,10 @@ except ImportError:
 # Camera control
 class Camera:
     def __init__(self):
-        self.pos = np.array([0.0, 0.0, 800.0])
+        self.pos = np.array([0.0, 0.0, 10.0])
         self.yaw = 0.0
         self.pitch = -30.0
-        self.speed = 5.0
+        self.speed = 0.2
         self.mouse_sensitivity = 0.2
         self.last_x = 0
         self.last_y = 0
@@ -71,97 +71,84 @@ class Camera:
             0.0, 1.0, 0.0
         )
 
-# Voxel Grid data
+# Voxel Grid data (supports non-cubic Nx x Ny x Nz grids)
 class VoxelGrid:
     def __init__(self):
         self.grid = None
-        self.N = 0
+        self.Nx = 0
+        self.Ny = 0
+        self.Nz = 0
         self.voxel_size = 0.0
         self.threshold = 0.5
         self.last_modified_time = 0
         self.mutex = Lock()
         self.display_list = None
         self.display_list_valid = False
-        
+
     def load_file(self, filename):
         if not os.path.exists(filename):
             return False
-            
-        # Check if file was modified since last load
+
         mod_time = os.path.getmtime(filename)
         if mod_time <= self.last_modified_time:
             return False
-            
+
         with open(filename, 'rb') as f:
             with self.mutex:
                 try:
-                    # Read grid size (N) as int32
-                    N_bytes = f.read(4)
-                    if not N_bytes or len(N_bytes) < 4:
+                    # New format: Nx, Ny, Nz (3 x int32), voxel_size (float32)
+                    header = f.read(16)
+                    if not header or len(header) < 16:
                         return False
-                    self.N = struct.unpack('i', N_bytes)[0]
-                    
-                    # Read voxel size as float32
-                    voxel_size_bytes = f.read(4)
-                    if not voxel_size_bytes or len(voxel_size_bytes) < 4:
-                        return False
-                    self.voxel_size = struct.unpack('f', voxel_size_bytes)[0]
-                    
-                    # Read grid data
-                    expected_size = self.N * self.N * self.N * 4  # float32 = 4 bytes
+                    self.Nx, self.Ny, self.Nz, self.voxel_size = struct.unpack('iiif', header)
+
+                    expected_size = self.Nx * self.Ny * self.Nz * 4
                     grid_bytes = f.read(expected_size)
                     if len(grid_bytes) < expected_size:
                         print(f"Error: Incomplete grid data in {filename}")
                         return False
-                        
-                    # Convert to numpy array
-                    self.grid = np.frombuffer(grid_bytes, dtype=np.float32)
-                    self.grid = self.grid.reshape((self.N, self.N, self.N))
-                    
-                    # Mark display list as invalid to regenerate it
+
+                    self.grid = np.frombuffer(grid_bytes, dtype=np.float32).copy()
+                    self.grid = self.grid.reshape((self.Nx, self.Ny, self.Nz))
+
                     self.display_list_valid = False
                     self.last_modified_time = mod_time
-                    
-                    print(f"Loaded voxel grid: {self.N}x{self.N}x{self.N}, voxel size: {self.voxel_size}")
+
+                    print(f"Loaded voxel grid: {self.Nx}x{self.Ny}x{self.Nz}, voxel size: {self.voxel_size}")
                     return True
                 except Exception as e:
                     print(f"Error loading voxel grid: {e}")
                     return False
-    
+
     def create_display_list(self):
         if self.grid is None:
             return
-        
+
         with self.mutex:
-            # Delete previous display list if it exists
             if self.display_list is not None:
                 glDeleteLists(self.display_list, 1)
-            
-            # Create a new display list
+
             self.display_list = glGenLists(1)
             glNewList(self.display_list, GL_COMPILE)
-            
-            # Draw voxels
-            half_size = self.N * self.voxel_size / 2.0
-            for i in range(self.N):
-                for j in range(self.N):
-                    for k in range(self.N):
+
+            half_x = self.Nx * self.voxel_size / 2.0
+            half_y = self.Ny * self.voxel_size / 2.0
+            half_z = self.Nz * self.voxel_size / 2.0
+            for i in range(self.Nx):
+                for j in range(self.Ny):
+                    for k in range(self.Nz):
                         val = self.grid[i, j, k]
                         if val > self.threshold:
-                            # Normalize value for color intensity
                             normalized_val = min(1.0, val / (self.threshold * 5.0))
-                            
-                            # Position in world space
-                            x = i * self.voxel_size - half_size
-                            y = j * self.voxel_size - half_size
-                            z = k * self.voxel_size - half_size
-                            
-                            # Draw cube
+
+                            x = i * self.voxel_size - half_x
+                            y = j * self.voxel_size - half_y
+                            z = k * self.voxel_size - half_z
+
                             glColor4f(1.0, 0.2, 0.2, normalized_val)
                             glPushMatrix()
                             glTranslatef(x, y, z)
-                            
-                            # Use cubes for high values, points for lower values
+
                             if normalized_val > 0.5:
                                 glutSolidCube(self.voxel_size * 0.9)
                             else:
@@ -169,9 +156,9 @@ class VoxelGrid:
                                 glBegin(GL_POINTS)
                                 glVertex3f(0, 0, 0)
                                 glEnd()
-                                
+
                             glPopMatrix()
-            
+
             glEndList()
             self.display_list_valid = True
 
@@ -245,7 +232,7 @@ def reshape(w, h):
     glViewport(0, 0, width, height)
     glMatrixMode(GL_PROJECTION)
     glLoadIdentity()
-    gluPerspective(45.0, width / height, 1.0, 5000.0)
+    gluPerspective(45.0, width / height, 0.01, 5000.0)
     glMatrixMode(GL_MODELVIEW)
 
 # ---------------- ZeroMQ live listener -----------------
@@ -265,13 +252,16 @@ def zmq_listener():
             continue
 
         try:
-            N, voxel_size = struct.unpack("if", meta)
+            # New format: Nx, Ny, Nz, voxel_size (3 ints + 1 float = 16 bytes)
+            Nx, Ny, Nz, voxel_size = struct.unpack("iiif", meta)
             decompressed = zlib.decompress(data)
-            grid = np.frombuffer(decompressed, dtype=np.float32)
+            grid = np.frombuffer(decompressed, dtype=np.float32).copy()
             with voxel_grid.mutex:
-                voxel_grid.N = N
+                voxel_grid.Nx = Nx
+                voxel_grid.Ny = Ny
+                voxel_grid.Nz = Nz
                 voxel_grid.voxel_size = voxel_size
-                voxel_grid.grid = grid.reshape((N, N, N))
+                voxel_grid.grid = grid.reshape((Nx, Ny, Nz))
                 voxel_grid.display_list_valid = False
         except Exception as e:
             print("ZMQ listener error", e)
@@ -322,36 +312,43 @@ def draw_grid():
     glColor3f(1.0, 0.0, 0.0)
     glBegin(GL_LINES)
     glVertex3f(0.0, 0.0, 0.0)
-    glVertex3f(100.0, 0.0, 0.0)
+    glVertex3f(1.0, 0.0, 0.0)
     glEnd()
-    
+
     # Y axis (green)
     glColor3f(0.0, 1.0, 0.0)
     glBegin(GL_LINES)
     glVertex3f(0.0, 0.0, 0.0)
-    glVertex3f(0.0, 100.0, 0.0)
+    glVertex3f(0.0, 1.0, 0.0)
     glEnd()
-    
+
     # Z axis (blue)
     glColor3f(0.0, 0.0, 1.0)
     glBegin(GL_LINES)
     glVertex3f(0.0, 0.0, 0.0)
-    glVertex3f(0.0, 0.0, 100.0)
+    glVertex3f(0.0, 0.0, 1.0)
     glEnd()
     
-    # Draw grid on XZ plane
+    # Draw grid on XZ plane (adapts to voxel grid scale)
     glLineWidth(1.0)
     glColor3f(0.5, 0.5, 0.5)
-    
-    grid_size = 1000
-    step = 100
-    
+
+    # Use voxel grid extent if available, otherwise default 10m
+    if voxel_grid.Nx > 0:
+        grid_extent = max(voxel_grid.Nx, voxel_grid.Ny, voxel_grid.Nz) * voxel_grid.voxel_size
+    else:
+        grid_extent = 10.0
+    step = max(0.5, grid_extent / 20.0)
+    half = grid_extent / 2.0
+
     glBegin(GL_LINES)
-    for i in range(-grid_size, grid_size + 1, step):
-        glVertex3f(i, 0.0, -grid_size)
-        glVertex3f(i, 0.0, grid_size)
-        glVertex3f(-grid_size, 0.0, i)
-        glVertex3f(grid_size, 0.0, i)
+    i = -half
+    while i <= half + 1e-6:
+        glVertex3f(i, 0.0, -half)
+        glVertex3f(i, 0.0, half)
+        glVertex3f(-half, 0.0, i)
+        glVertex3f(half, 0.0, i)
+        i += step
     glEnd()
 
 # OpenGL display function

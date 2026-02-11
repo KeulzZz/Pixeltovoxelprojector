@@ -53,7 +53,18 @@ struct CameraInfo {
     Vec3 camera_position;
     float yaw, pitch, roll;
     float fov_degrees;
-    // Additional camera parameters can be added here
+};
+
+struct GridConfig {
+    int Nx = 500, Ny = 500, Nz = 500;
+    float voxel_size = 6.0f;
+    Vec3 center = {0.f, 0.f, 500.f};
+    float decay_rate = 1.0f;   // fraction of voxel value remaining after 1 second (1.0 = no decay)
+    float motion_threshold = 5.0f;
+    float distance_attenuation = 0.1f;
+    bool show_debug = false;
+    std::string output_dir = ".";
+    int save_interval_seconds = 30;
 };
 
 struct FrameData {
@@ -177,65 +188,92 @@ Mat3 rotation_matrix_yaw_pitch_roll(float yaw_deg, float pitch_deg, float roll_d
 //----------------------------------------------
 // 4) Load Camera Configuration
 //----------------------------------------------
-std::vector<CameraInfo> load_camera_config(const std::string &json_path) {
+
+static CameraInfo parse_camera_entry(const json &entry) {
+    CameraInfo ci;
+    ci.camera_index = entry.value("camera_index", 0);
+    ci.rtsp_url = entry.value("rtsp_url", "");
+    ci.yaw = entry.value("yaw", 0.f);
+    ci.pitch = entry.value("pitch", 0.f);
+    ci.roll = entry.value("roll", 0.f);
+    ci.fov_degrees = entry.value("fov_degrees", 60.f);
+    if (entry.contains("camera_position") && entry["camera_position"].is_array()) {
+        auto arr = entry["camera_position"];
+        if (arr.size() >= 3) {
+            ci.camera_position.x = arr[0].get<float>();
+            ci.camera_position.y = arr[1].get<float>();
+            ci.camera_position.z = arr[2].get<float>();
+        }
+    }
+    return ci;
+}
+
+static GridConfig parse_grid_config(const json &g) {
+    GridConfig gc;
+    // "size" can be a single int (cubic) or an array of 3 ints
+    if (g.contains("size")) {
+        if (g["size"].is_array() && g["size"].size() >= 3) {
+            gc.Nx = g["size"][0].get<int>();
+            gc.Ny = g["size"][1].get<int>();
+            gc.Nz = g["size"][2].get<int>();
+        } else if (g["size"].is_number()) {
+            gc.Nx = gc.Ny = gc.Nz = g["size"].get<int>();
+        }
+    }
+    gc.voxel_size = g.value("voxel_size", gc.voxel_size);
+    if (g.contains("center") && g["center"].is_array() && g["center"].size() >= 3) {
+        gc.center.x = g["center"][0].get<float>();
+        gc.center.y = g["center"][1].get<float>();
+        gc.center.z = g["center"][2].get<float>();
+    }
+    gc.decay_rate = g.value("decay_rate", gc.decay_rate);
+    gc.motion_threshold = g.value("motion_threshold", gc.motion_threshold);
+    gc.distance_attenuation = g.value("distance_attenuation", gc.distance_attenuation);
+    gc.show_debug = g.value("show_debug", gc.show_debug);
+    gc.save_interval_seconds = g.value("save_interval_seconds", gc.save_interval_seconds);
+    return gc;
+}
+
+struct AppConfig {
     std::vector<CameraInfo> cameras;
+    GridConfig grid;
+};
+
+AppConfig load_config(const std::string &json_path) {
+    AppConfig cfg;
 
     std::ifstream ifs(json_path);
     if(!ifs.is_open()){
         std::cerr << "ERROR: Cannot open " << json_path << std::endl;
-        return cameras;
+        return cfg;
     }
-    
+
     json j;
     ifs >> j;
-    
-    // Check if JSON is an array (multiple cameras) or object (single camera)
-    if (j.is_array()) {
-        for (const auto &entry : j) {
-            CameraInfo ci;
-            ci.camera_index = entry.value("camera_index", 0);
-            ci.rtsp_url = entry.value("rtsp_url", "");
-            ci.yaw = entry.value("yaw", 0.f);
-            ci.pitch = entry.value("pitch", 0.f);
-            ci.roll = entry.value("roll", 0.f);
-            ci.fov_degrees = entry.value("fov_degrees", 60.f);
 
-            // camera_position array
-            if (entry.contains("camera_position") && entry["camera_position"].is_array()) {
-                auto arr = entry["camera_position"];
-                if (arr.size() >= 3) {
-                    ci.camera_position.x = arr[0].get<float>();
-                    ci.camera_position.y = arr[1].get<float>();
-                    ci.camera_position.z = arr[2].get<float>();
-                }
-            }
-            cameras.push_back(ci);
+    if (j.is_array()) {
+        // Legacy format: bare array of cameras, grid uses defaults
+        for (const auto &entry : j) {
+            cfg.cameras.push_back(parse_camera_entry(entry));
         }
     } else if (j.is_object()) {
-        // Handle single camera config
-        CameraInfo ci;
-        ci.camera_index = j.value("camera_index", 0);
-        ci.rtsp_url = j.value("rtsp_url", "");
-        ci.yaw = j.value("yaw", 0.f);
-        ci.pitch = j.value("pitch", 0.f);
-        ci.roll = j.value("roll", 0.f);
-        ci.fov_degrees = j.value("fov_degrees", 60.f);
-
-        // camera_position array
-        if (j.contains("camera_position") && j["camera_position"].is_array()) {
-            auto arr = j["camera_position"];
-            if (arr.size() >= 3) {
-                ci.camera_position.x = arr[0].get<float>();
-                ci.camera_position.y = arr[1].get<float>();
-                ci.camera_position.z = arr[2].get<float>();
+        // New format: { "grid": {...}, "cameras": [...] }
+        if (j.contains("cameras") && j["cameras"].is_array()) {
+            for (const auto &entry : j["cameras"]) {
+                cfg.cameras.push_back(parse_camera_entry(entry));
             }
+        } else {
+            // Single camera object (legacy)
+            cfg.cameras.push_back(parse_camera_entry(j));
         }
-        cameras.push_back(ci);
+        if (j.contains("grid") && j["grid"].is_object()) {
+            cfg.grid = parse_grid_config(j["grid"]);
+        }
     } else {
         std::cerr << "ERROR: JSON format not recognized.\n";
     }
 
-    return cameras;
+    return cfg;
 }
 
 //----------------------------------------------
@@ -318,22 +356,24 @@ static inline float safe_div(float num, float den) {
 }
 
 std::vector<RayStep> cast_ray_into_grid(
-    const Vec3 &camera_pos, 
-    const Vec3 &dir_normalized, 
-    int N, 
-    float voxel_size, 
+    const Vec3 &camera_pos,
+    const Vec3 &dir_normalized,
+    int Nx, int Ny, int Nz,
+    float voxel_size,
     const Vec3 &grid_center)
 {
     std::vector<RayStep> steps;
     steps.reserve(64);
 
-    float half_size = 0.5f * (N * voxel_size);
-    Vec3 grid_min = { grid_center.x - half_size,
-                      grid_center.y - half_size,
-                      grid_center.z - half_size };
-    Vec3 grid_max = { grid_center.x + half_size,
-                      grid_center.y + half_size,
-                      grid_center.z + half_size };
+    float half_x = 0.5f * (Nx * voxel_size);
+    float half_y = 0.5f * (Ny * voxel_size);
+    float half_z = 0.5f * (Nz * voxel_size);
+    Vec3 grid_min = { grid_center.x - half_x,
+                      grid_center.y - half_y,
+                      grid_center.z - half_z };
+    Vec3 grid_max = { grid_center.x + half_x,
+                      grid_center.y + half_y,
+                      grid_center.z + half_z };
 
     float t_min = 0.f;
     float t_max = std::numeric_limits<float>::infinity();
@@ -375,7 +415,7 @@ std::vector<RayStep> cast_ray_into_grid(
     int ix = int(fx);
     int iy = int(fy);
     int iz = int(fz);
-    if(ix<0 || ix>=N || iy<0 || iy>=N || iz<0 || iz>=N) {
+    if(ix<0 || ix>=Nx || iy<0 || iy>=Ny || iz<0 || iz>=Nz) {
         return steps;
     }
 
@@ -432,7 +472,7 @@ std::vector<RayStep> cast_ray_into_grid(
             t_max_z += t_delta_z;
         }
         step_count++;
-        if(ix<0 || ix>=N || iy<0 || iy>=N || iz<0 || iz>=N){
+        if(ix<0 || ix>=Nx || iy<0 || iy>=Ny || iz<0 || iz>=Nz){
             break;
         }
     }
@@ -502,109 +542,169 @@ void camera_stream_thread(
 }
 
 //----------------------------------------------
-// 8) Processing Thread
+// 8) Debug frame sharing
+//----------------------------------------------
+struct DebugState {
+    std::map<int, cv::Mat> frames;   // latest motion overlay per camera
+    std::mutex mutex;
+};
+
+//----------------------------------------------
+// 9) Processing Thread
 //----------------------------------------------
 void processing_thread(
     std::map<int, CameraInfo> camera_info_map,
     std::shared_ptr<FrameQueue> frame_queue,
     std::mutex& voxel_grid_mutex,
     std::vector<float>& voxel_grid,
-    const int N,
-    const float voxel_size,
-    const Vec3& grid_center,
-    float motion_threshold,
-    float alpha,  // distance-based attenuation
+    const GridConfig& gc,
     std::atomic<bool>& running,
 #ifdef HAVE_ZMQ
     zmq::socket_t* pub_socket,
 #else
     void* /*unused*/,
 #endif
-    int save_interval_seconds = 30
+    DebugState& debug_state
 ) {
+    const int Nx = gc.Nx, Ny = gc.Ny, Nz = gc.Nz;
+    const float voxel_size = gc.voxel_size;
+    const Vec3 grid_center = gc.center;
+    const float motion_threshold = gc.motion_threshold;
+    const float alpha = gc.distance_attenuation;
+
     // Map to store the previous frame for each camera
     std::map<int, ImageGray> prev_frames;
+    std::map<int, cv::Mat> prev_raw_frames; // for debug overlay
     std::map<int, std::chrono::steady_clock::time_point> last_frame_times;
-    
+
     auto last_save_time = std::chrono::system_clock::now();
-    
+    auto last_decay_time = std::chrono::steady_clock::now();
+
     while (running) {
         FrameData frame_data;
         if (frame_queue->waitAndPop(frame_data, 100)) {
             int camera_index = frame_data.camera_index;
-            
+
             // Convert to our image format
             ImageGray curr_img = convert_mat_to_gray(frame_data.frame);
-            
+
             // Check if we have a previous frame for this camera
             if (prev_frames.find(camera_index) == prev_frames.end()) {
-                // First frame for this camera
                 prev_frames[camera_index] = curr_img;
+                if (gc.show_debug) prev_raw_frames[camera_index] = frame_data.frame.clone();
                 last_frame_times[camera_index] = frame_data.timestamp;
                 continue;
             }
-            
+
             // Compute time difference between frames
             auto time_diff = std::chrono::duration_cast<std::chrono::milliseconds>(
                 frame_data.timestamp - last_frame_times[camera_index]).count();
-            
-            // Skip if frames are too close together (optional - helps with slower streams)
-            if (time_diff < 30) { // 30ms minimum between processed frames
+
+            if (time_diff < 30) {
                 continue;
             }
-            
+
+            // --- Voxel decay (time-based, independent of camera count/FPS) ---
+            if (gc.decay_rate < 1.0f && gc.decay_rate > 0.f) {
+                auto now_steady = std::chrono::steady_clock::now();
+                float dt = std::chrono::duration<float>(now_steady - last_decay_time).count();
+                if (dt >= 0.033f) { // apply at ~30Hz max
+                    float factor = std::pow(gc.decay_rate, dt);
+                    {
+                        std::lock_guard<std::mutex> lock(voxel_grid_mutex);
+                        for (auto& v : voxel_grid) v *= factor;
+                    }
+                    last_decay_time = now_steady;
+                }
+            }
+
             // Detect motion
             auto& prev_img = prev_frames[camera_index];
             MotionMask mm = detect_motion(prev_img, curr_img, motion_threshold);
-            
+
+            // --- Debug visualization: motion mask overlaid on camera feed ---
+            if (gc.show_debug && mm.width > 0 && mm.height > 0) {
+                cv::Mat overlay;
+                // Resize current frame to a reasonable debug window size
+                int dbg_w = std::min(mm.width, 640);
+                float scale = float(dbg_w) / float(mm.width);
+                int dbg_h = int(mm.height * scale);
+                cv::resize(frame_data.frame, overlay, cv::Size(dbg_w, dbg_h));
+                if (overlay.channels() == 1)
+                    cv::cvtColor(overlay, overlay, cv::COLOR_GRAY2BGR);
+
+                // Draw motion pixels as red overlay
+                for (int row = 0; row < dbg_h; row++) {
+                    for (int col = 0; col < dbg_w; col++) {
+                        int src_row = int(row / scale);
+                        int src_col = int(col / scale);
+                        if (src_row < mm.height && src_col < mm.width) {
+                            if (mm.changed[src_row * mm.width + src_col]) {
+                                auto& pix = overlay.at<cv::Vec3b>(row, col);
+                                pix[0] = 0;                          // B
+                                pix[1] = 0;                          // G
+                                pix[2] = std::min(255, pix[2] + 180); // R
+                            }
+                        }
+                    }
+                }
+
+                // Count changed pixels for display
+                int changed_count = 0;
+                for (int i = 0; i < mm.width * mm.height; i++)
+                    if (mm.changed[i]) changed_count++;
+                std::string label = "Cam " + std::to_string(camera_index)
+                    + " motion: " + std::to_string(changed_count) + " px";
+                cv::putText(overlay, label, cv::Point(10, 25),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 0), 2);
+
+                {
+                    std::lock_guard<std::mutex> lock(debug_state.mutex);
+                    debug_state.frames[camera_index] = overlay;
+                }
+            }
+
             if (mm.width > 0 && mm.height > 0) {
                 // Get camera info
                 const auto& cam_info = camera_info_map[camera_index];
-                
-                // Use the current frame's camera info for ray-casting
                 Vec3 cam_pos = cam_info.camera_position;
                 Mat3 cam_rot = rotation_matrix_yaw_pitch_roll(cam_info.yaw, cam_info.pitch, cam_info.roll);
-                // --- camera intrinsics ---
+
                 float fov_h_rad = deg2rad(cam_info.fov_degrees);
                 float fx = (mm.width * 0.5f) / std::tan(fov_h_rad * 0.5f);
                 float aspect = float(mm.width) / float(mm.height);
                 float fov_v_rad = 2.f * std::atan((1.f / aspect) * std::tan(fov_h_rad * 0.5f));
                 float fy = (mm.height * 0.5f) / std::tan(fov_v_rad * 0.5f);
 
-                // For each changed pixel, accumulate into the voxel grid
                 bool any_voxel_written = false;
                 {
                     std::lock_guard<std::mutex> lock(voxel_grid_mutex);
-                    
+
                     for (int v = 0; v < mm.height; v++) {
                         for (int u = 0; u < mm.width; u++) {
                             if (!mm.changed[v * mm.width + u])
-                                continue; // skip if no motion
+                                continue;
 
                             float pix_val = mm.diff[v * mm.width + u];
                             if (pix_val < 1e-3f)
                                 continue;
 
-                            // Build local camera direction
                             float x = (float(u) - 0.5f * mm.width)  / fx;
                             float y = -(float(v) - 0.5f * mm.height) / fy;
                             Vec3 ray_cam = { x, y, -1.f };
                             ray_cam = normalize(ray_cam);
 
-                            // Transform to world
                             Vec3 ray_world = mat3_mul_vec3(cam_rot, ray_cam);
                             ray_world = normalize(ray_world);
 
-                            // DDA
                             std::vector<RayStep> steps = cast_ray_into_grid(
-                                cam_pos, ray_world, N, voxel_size, grid_center);
+                                cam_pos, ray_world, Nx, Ny, Nz, voxel_size, grid_center);
 
-                            // Accumulate
                             for (const auto& rs : steps) {
                                 float dist = rs.distance;
                                 float attenuation = 1.f / (1.f + alpha * dist);
                                 float val = pix_val * attenuation;
-                                int idx = rs.ix * N * N + rs.iy * N + rs.iz;
+                                int idx = rs.ix * Ny * Nz + rs.iy * Nz + rs.iz;
                                 voxel_grid[idx] += val;
                                 any_voxel_written = true;
                             }
@@ -617,14 +717,13 @@ void processing_thread(
                     std::cout << "[" << std::put_time(std::localtime(&t), "%H:%M:%S")
                               << "] Camera " << camera_index << " added voxels." << std::endl;
                 }
+
 #ifdef HAVE_ZMQ
-                // Publish compressed voxel grid every frame for live viewer
                 if (pub_socket && pub_socket->handle() != nullptr) {
                     std::lock_guard<std::mutex> grid_lock(voxel_grid_mutex);
 
-                    struct Meta { int N; float voxel_size; } meta{N, voxel_size};
+                    struct Meta { int nx; int ny; int nz; float vs; } meta{Nx, Ny, Nz, voxel_size};
 
-                    // Compress voxel vector (fast)
                     uLong src_len = voxel_grid.size() * sizeof(float);
                     uLong dst_len = compressBound(src_len);
                     std::vector<uint8_t> compressed(dst_len);
@@ -645,110 +744,136 @@ void processing_thread(
                 }
 #endif
             }
-            
-            // Update previous frame and timestamp
+
             prev_frames[camera_index] = curr_img;
+            if (gc.show_debug) prev_raw_frames[camera_index] = frame_data.frame.clone();
             last_frame_times[camera_index] = frame_data.timestamp;
         }
-        
-        // Check if it's time to save the voxel grid
+
+        // Periodic voxel grid save
         auto now = std::chrono::system_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_save_time).count();
-        
-        if (elapsed >= save_interval_seconds) {
-            // Save voxel grid
-            {
-                std::lock_guard<std::mutex> lock(voxel_grid_mutex);
-                
-                std::string output_bin = "voxel_grid_" + 
-                    std::to_string(std::chrono::system_clock::to_time_t(now)) + ".bin";
-                
-                std::ofstream ofs(output_bin, std::ios::binary);
-                if (!ofs) {
-                    std::cerr << "Cannot open output file: " << output_bin << "\n";
-                } else {
-                    // Write metadata (N, voxel_size)
-                    ofs.write(reinterpret_cast<const char*>(&N), sizeof(int));
-                    ofs.write(reinterpret_cast<const char*>(&voxel_size), sizeof(float));
-                    // Write the data
-                    ofs.write(reinterpret_cast<const char*>(voxel_grid.data()), voxel_grid.size() * sizeof(float));
-                    ofs.close();
-                    std::cout << "Saved voxel grid to " << output_bin << "\n";
-                }
+
+        if (elapsed >= gc.save_interval_seconds) {
+            std::lock_guard<std::mutex> lock(voxel_grid_mutex);
+
+            std::string output_bin = gc.output_dir + "/voxel_grid_" +
+                std::to_string(std::chrono::system_clock::to_time_t(now)) + ".bin";
+
+            std::ofstream ofs(output_bin, std::ios::binary);
+            if (!ofs) {
+                std::cerr << "Cannot open output file: " << output_bin << "\n";
+            } else {
+                ofs.write(reinterpret_cast<const char*>(&Nx), sizeof(int));
+                ofs.write(reinterpret_cast<const char*>(&Ny), sizeof(int));
+                ofs.write(reinterpret_cast<const char*>(&Nz), sizeof(int));
+                ofs.write(reinterpret_cast<const char*>(&voxel_size), sizeof(float));
+                ofs.write(reinterpret_cast<const char*>(voxel_grid.data()), voxel_grid.size() * sizeof(float));
+                ofs.close();
+                std::cout << "Saved voxel grid to " << output_bin << "\n";
             }
-            
+
             last_save_time = now;
         }
     }
 }
 
 //----------------------------------------------
-// 9) Main Function
+// 10) Save voxel grid helper
+//----------------------------------------------
+static void save_voxel_grid(
+    const std::vector<float>& voxel_grid,
+    std::mutex& voxel_grid_mutex,
+    const GridConfig& gc,
+    const std::string& tag)
+{
+    std::lock_guard<std::mutex> lock(voxel_grid_mutex);
+    auto now = std::chrono::system_clock::now();
+    std::string output_bin = gc.output_dir + "/voxel_grid_" + tag + "_" +
+        std::to_string(std::chrono::system_clock::to_time_t(now)) + ".bin";
+
+    std::ofstream ofs(output_bin, std::ios::binary);
+    if (!ofs) {
+        std::cerr << "Cannot open output file: " << output_bin << "\n";
+        return;
+    }
+    ofs.write(reinterpret_cast<const char*>(&gc.Nx), sizeof(int));
+    ofs.write(reinterpret_cast<const char*>(&gc.Ny), sizeof(int));
+    ofs.write(reinterpret_cast<const char*>(&gc.Nz), sizeof(int));
+    float vs = gc.voxel_size;
+    ofs.write(reinterpret_cast<const char*>(&vs), sizeof(float));
+    ofs.write(reinterpret_cast<const char*>(voxel_grid.data()), voxel_grid.size() * sizeof(float));
+    ofs.close();
+    std::cout << "Saved voxel grid to " << output_bin << "\n";
+}
+
+//----------------------------------------------
+// 11) Main Function
 //----------------------------------------------
 int main(int argc, char** argv) {
     setenv("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp|stimeout;5000000|max_delay;0", 1);
 
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <camera_config.json> [output_dir] [save_interval_seconds]\n";
-        std::cerr << "camera_config.json: JSON file with camera parameters and RTSP URLs\n";
-        std::cerr << "output_dir: Directory to save voxel grids (default: .)\n";
-        std::cerr << "save_interval_seconds: How often to save voxel grid (default: 30 seconds)\n";
+        std::cerr << "Usage: " << argv[0] << " <camera_config.json> [output_dir]\n";
+        std::cerr << "  camera_config.json: JSON config with grid parameters and cameras\n";
+        std::cerr << "  output_dir: Override output directory (default: from config or '.')\n";
         return 1;
     }
-    
+
     std::string config_path = argv[1];
-    std::string output_dir = (argc > 2) ? argv[2] : ".";
-    int save_interval = (argc > 3) ? std::stoi(argv[3]) : 30;
-
-    // Create output directory if it doesn't exist
-    std::string mkdir_cmd = "mkdir -p " + output_dir;
-    system(mkdir_cmd.c_str());
 
     //------------------------------------------
-    // 9.1) Load camera configuration
+    // Load configuration
     //------------------------------------------
-    std::vector<CameraInfo> cameras = load_camera_config(config_path);
-    if (cameras.empty()) {
+    AppConfig app = load_config(config_path);
+    if (app.cameras.empty()) {
         std::cerr << "No cameras configured.\n";
         return 1;
     }
 
+    GridConfig& gc = app.grid;
+
+    // CLI override for output dir
+    if (argc > 2) gc.output_dir = argv[2];
+
+    // Create output directory
+    std::string mkdir_cmd = "mkdir -p " + gc.output_dir;
+    system(mkdir_cmd.c_str());
+
     std::map<int, CameraInfo> camera_info_map;
-    for (const auto& camera : cameras) {
+    for (const auto& camera : app.cameras) {
         camera_info_map[camera.camera_index] = camera;
     }
 
-    std::cout << "Loaded " << cameras.size() << " camera configurations\n";
+    std::cout << "Loaded " << app.cameras.size() << " camera(s)\n";
+    std::cout << "Grid: " << gc.Nx << "x" << gc.Ny << "x" << gc.Nz
+              << "  voxel_size=" << gc.voxel_size << "m"
+              << "  center=(" << gc.center.x << "," << gc.center.y << "," << gc.center.z << ")"
+              << "  decay=" << gc.decay_rate
+              << "  debug=" << (gc.show_debug ? "ON" : "OFF") << "\n";
+    std::cout << "Grid memory: "
+              << (size_t(gc.Nx) * gc.Ny * gc.Nz * sizeof(float)) / (1024*1024) << " MB\n";
 
     //------------------------------------------
-    // 9.2) Create a 3D voxel grid
+    // Create voxel grid
     //------------------------------------------
-    const int N = 500;
-    const float voxel_size = 6.f;
-    // Center of the voxel grid
-    Vec3 grid_center = {0.f, 0.f, 500.f};
-
-    std::vector<float> voxel_grid(N*N*N, 0.f);
+    std::vector<float> voxel_grid(size_t(gc.Nx) * gc.Ny * gc.Nz, 0.f);
     std::mutex voxel_grid_mutex;
 
     //------------------------------------------
-    // 9.3) Start camera and processing threads
+    // Start threads
     //------------------------------------------
     std::atomic<bool> running(true);
     auto frame_queue = std::make_shared<FrameQueue>();
-    
+
     std::vector<std::thread> camera_threads;
-    for (const auto& camera : cameras) {
-        camera_threads.emplace_back(camera_stream_thread, 
-                                   camera, 
-                                   frame_queue, 
+    for (const auto& camera : app.cameras) {
+        camera_threads.emplace_back(camera_stream_thread,
+                                   camera,
+                                   frame_queue,
                                    std::ref(running));
     }
-    
-    // Processing thread
-    float motion_threshold = 5.0f;  // higher threshold for real-time processing
-    float alpha = 0.1f;            // distance-based attenuation
-    
+
 #ifdef HAVE_ZMQ
     zmq::context_t zmq_ctx(1);
     zmq::socket_t  zmq_pub(zmq_ctx, zmq::socket_type::pub);
@@ -767,67 +892,69 @@ int main(int argc, char** argv) {
     }
 #endif
 
+    DebugState debug_state;
+
     std::thread processor(processing_thread,
                          camera_info_map,
                          frame_queue,
                          std::ref(voxel_grid_mutex),
                          std::ref(voxel_grid),
-                         N,
-                         voxel_size,
-                         grid_center,
-                         motion_threshold,
-                         alpha,
+                         std::cref(gc),
                          std::ref(running),
 #ifdef HAVE_ZMQ
                          &zmq_pub,
 #else
                          nullptr,
 #endif
-                         save_interval);
-    
-    // Basic console interface
-    std::cout << "Real-time RTSP stream processing started.\n";
+                         std::ref(debug_state));
+
+    std::cout << "Real-time processing started.\n";
     std::cout << "Press 'q' to quit, 's' to save current voxel grid.\n";
-    
-    char cmd;
-    while (running) {
-        cmd = std::cin.get();
-        if (cmd == 'q' || cmd == 'Q') {
-            running = false;
-        } else if (cmd == 's' || cmd == 'S') {
-            // Save the current voxel grid
-            std::lock_guard<std::mutex> lock(voxel_grid_mutex);
-            
-            auto now = std::chrono::system_clock::now();
-            std::string output_bin = output_dir + "/voxel_grid_manual_" + 
-                std::to_string(std::chrono::system_clock::to_time_t(now)) + ".bin";
-            
-            std::ofstream ofs(output_bin, std::ios::binary);
-            if (!ofs) {
-                std::cerr << "Cannot open output file: " << output_bin << "\n";
-            } else {
-                // Write metadata (N, voxel_size)
-                ofs.write(reinterpret_cast<const char*>(&N), sizeof(int));
-                ofs.write(reinterpret_cast<const char*>(&voxel_size), sizeof(float));
-                // Write the data
-                ofs.write(reinterpret_cast<const char*>(voxel_grid.data()), voxel_grid.size() * sizeof(float));
-                ofs.close();
-                std::cout << "Saved voxel grid to " << output_bin << "\n";
+    if (gc.show_debug) {
+        std::cout << "Debug windows enabled - press 'q' in any OpenCV window to quit.\n";
+    }
+
+    //------------------------------------------
+    // Main loop: show debug windows + handle input
+    //------------------------------------------
+    if (gc.show_debug) {
+        // GUI event loop: show debug frames and poll keyboard via OpenCV
+        while (running) {
+            {
+                std::lock_guard<std::mutex> lock(debug_state.mutex);
+                for (auto& [cam_id, frame] : debug_state.frames) {
+                    if (!frame.empty()) {
+                        cv::imshow("Camera " + std::to_string(cam_id) + " Motion", frame);
+                    }
+                }
+            }
+            int key = cv::waitKey(30);
+            if (key == 'q' || key == 'Q') {
+                running = false;
+            } else if (key == 's' || key == 'S') {
+                save_voxel_grid(voxel_grid, voxel_grid_mutex, gc, "manual");
+            }
+        }
+        cv::destroyAllWindows();
+    } else {
+        // Text-only mode: read from stdin
+        char cmd;
+        while (running) {
+            cmd = std::cin.get();
+            if (cmd == 'q' || cmd == 'Q') {
+                running = false;
+            } else if (cmd == 's' || cmd == 'S') {
+                save_voxel_grid(voxel_grid, voxel_grid_mutex, gc, "manual");
             }
         }
     }
-    
+
     // Wait for threads to finish
     for (auto& thread : camera_threads) {
-        if (thread.joinable()) {
-            thread.join();
-        }
+        if (thread.joinable()) thread.join();
     }
-    
-    if (processor.joinable()) {
-        processor.join();
-    }
-    
+    if (processor.joinable()) processor.join();
+
     std::cout << "All threads stopped. Exiting.\n";
     return 0;
 } 
